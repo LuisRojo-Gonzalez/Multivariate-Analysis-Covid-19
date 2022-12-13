@@ -1,0 +1,471 @@
+---
+title: "Multivariate analysis of COVID-19"
+author: "Guillem Bonilla and Luis Rojo-González"
+date: ""
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r echo = FALSE}
+# Working directory
+setwd("~/Desktop/UPC/MultivariateAnalysis/Project")
+source("func.R")
+```
+
+```{r message = FALSE, warning = FALSE}
+# Libraries
+library(readr)
+library(dplyr)
+library(tidyr)
+library(cowplot)
+library(ggpubr)
+library(MASS)
+library(ggplot2)
+library(vegan)
+library(cluster)  # PAM
+library(factoextra) # fviz_nbclust (TESS)
+library(clusterSim) # index.G1, index.S
+library(knitr)
+library(ggalt)
+library(xtable)
+library(ggrepel)
+library(psych)
+library(GPArotation)
+library(magrittr)
+library(ggpubr)
+library(MVN) # test normalidad multivariante
+library(sf)
+library(rworldmap)
+library(Hotelling)  # Hotelling
+```
+
+```{r message=FALSE, warning=FALSE}
+# Loading dataset
+# confirmed cases
+confirmed = read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv")
+confirmed$case = "confirmed"
+
+# death cases
+death = read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv")
+death$case = "death"
+
+# Recovered cases
+recovered = read_csv("https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_recovered_global.csv")
+recovered$case = "recovered"
+
+data = rbind(confirmed, death, recovered)
+
+# transforming data
+data = data %>% dplyr::select(-c("Province/State","Lat","Long"))
+data$`Country/Region` = as.factor(data$`Country/Region`)
+data$case = as.factor(data$case)
+
+# consolidating data
+data.1 = aggregate(. ~ `Country/Region` + case, data = data, FUN = "sum")
+```
+
+```{r}
+aux = data.1 %>% gather(key = "date", value = "number", -`Country/Region`, -case)
+aux$date = as.Date(as.POSIXct(strptime(aux$date, "%m/%d/%y")))
+```
+
+```{r}
+datos = aux %>% group_by(`Country/Region`, case) %>%
+  filter(number > 0, number <= max(number)) %>%
+  # filter(number > 0) %>%
+  mutate(number = number - lag(number, k = -1)) %>%
+  summarise(Mean = mean(number, na.rm = TRUE),
+            SD = sd(number, na.rm = TRUE),
+            n = n()) %>%
+  group_by(case) %>%
+  # filter(n > median(n)) %>%
+  ungroup() %>%
+  gather(key = "Measure", value = "Value", -`Country/Region`, -case) %>%
+  unite(temp, Measure, case) %>%
+  spread(temp, Value) %>%
+  na.omit()
+```
+
+```{r}
+health = read.csv("2.12_Health_systems.csv")
+health = health %>%
+  # dplyr::select(c("Country_Region", "Health_exp_pct_GDP_2016",
+  #          "Health_exp_public_pct_2016", "Health_exp_out_of_pocket_pct_2016",
+  #          "Nurse_midwife_per_1000_2009.18", "Specialist_surgical_per_1000_2008.18")) %>%
+  dplyr::select(c("Country_Region", "Health_exp_public_pct_2016", 
+                  "Health_exp_per_capita_USD_2016", "Nurse_midwife_per_1000_2009.18",
+                  "Specialist_surgical_per_1000_2008.18")) %>%
+  na.omit() %>%
+  aggregate(. ~ Country_Region, data = ., FUN = "sum")
+health = health[2:nrow(health), ]
+```
+
+```{r message=FALSE, warning=FALSE}
+datos1 = inner_join(datos, health, by = c("Country/Region" = "Country_Region"))
+write_csv(datos1, "Data.csv")
+```
+
+```{r}
+stat = function(tess, datos, dist, clust) {
+  delta = data.frame(Cluster = c(2:clust))
+  for (i in 2:clust) {
+    # TESS
+    delta[i-1, 2] = (tess$data[i-1, 2]-tess$data[i, 2])*100/tess$data[i-1, 2]
+    
+    # Pseudo F
+    clus = pam(dist, i, diss = T) # Partitioning Around Medoids
+    # clus = eclust(datos, k = i,
+    #               FUNcluster = "pam",
+    #               graph = FALSE,
+    #               hc_metric = "euclidean")
+    PseudoF.hel = index.G1(x = datos, cl = clus$cluster,
+                           d = dist, centrotypes = "medoids") #"centroids" or "medoids"
+    delta[i-1, 3] = PseudoF.hel
+  }
+  
+  # Silhouette
+  sil = fviz_nbclust(datos, FUNcluster = pam, #kmeans #pam
+                     diss = dist, method = "sil") + theme_bw()
+  delta$sil = as.vector(sil$data)[2:clust, 2]
+  
+  colnames(delta) = c("Cluster", "TESS", "PseudoF", "Silhouette")
+  return(delta)
+}
+```
+
+\section{Clustering: with outliers}
+
+```{r}
+d.eucl = dist(scale(datos1[-1]), method = "euclidean")
+# data.hel = decostand(datos1[, -1], "hel")
+# d.hel = dist(data.hel)
+```
+
+```{r fig.height = 5, fig.width = 10, warning=FALSE, message=FALSE}
+(TESS1 = my_fviz_nbclust(scale(datos1[-1]), FUNcluster = pam,
+                        diss = d.eucl, k.max = 10,
+                        method = "wss") + theme_bw())
+# ggsave("Figures/Screeplot.png")
+```
+
+```{r results = 'asis'}
+print(xtable(stat(TESS1, datos = scale(datos1[-1]), dist = d.eucl, clust = 10),
+             digits = 2, label = "tab:index1",
+             caption = "."),
+             caption.placement = "top", comment = FALSE, include.rownames = FALSE)
+```
+
+```{r}
+k = 5
+clustering = pam(d.eucl, k, diss = T)
+datos1[clustering$medoids, ]
+```
+
+```{r fig.height = 5, fig.width = 10, message=FALSE, warning=FALSE}
+fviz_silhouette(clustering, print.summary = FALSE) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+# ggsave("Figures/Silhouette_1.png")
+```
+
+```{r}
+fac.clustering = fa(scale(datos1[-1]), nfactors = 2, rotate = "varimax", fm = "minres")
+
+(corr = tibble(Variable = names(datos1[-1]),
+               Axis1 = t(round(cor(fac.clustering$scores[, 1], scale(datos1[-1])), 4)),
+               # Axis2 = t(round(cor(fac.clustering$scores[, 2], scale(datos1[-1])), 4)),
+               Axis2 = t(round(cor(fac.clustering$scores[, 2], scale(datos1[-1])), 4))))
+```
+
+```{r fig.height = 5, fig.width = 5, message = FALSE, warning = FALSE}
+aux.clus = tibble(x = fac.clustering$scores[, 1],
+                  y = fac.clustering$scores[, 2],
+                  Group = factor(clustering$clustering))
+
+(p1 = ggplot(aux.clus, aes(x = x, y = y, color = Group)) +
+  geom_point(aes(shape = Group)) +
+  theme_bw() +
+  labs(x = "Most observed cases", y = "Investment on healthcare (pp)") +
+  geom_text(label = datos1$`Country/Region`, #aux.clus$Cluster,
+            hjust = -0.2, vjust = -.02, show.legend = FALSE) +
+  # geom_encircle(aes(fill = Cluster), s_shape = 1, expand = 0,
+  #               alpha = 0.2, color = "black", show.legend = FALSE) +
+  stat_ellipse(type = "norm", linetype = 1) +
+  # labs(subtitle = paste("Explained variance:", 100*round(mds.pam$GOF[1], 4), "%")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        text = element_text(size = 16),
+        legend.position = "bottom"))
+```
+
+\section{Clustering: without outliers}
+
+```{r}
+datos1 = datos1 %>% filter(`Country/Region` != "US") # US distorsiona el analisis
+d.eucl = dist(scale(datos1[-1]), method = "euclidean")
+# data.hel = decostand(datos1[, -1], "hel")
+# d.hel = dist(data.hel)
+```
+
+```{r fig.height = 5, fig.width = 10, warning=FALSE, message=FALSE}
+(TESS2 = my_fviz_nbclust(scale(datos1[-1]), FUNcluster = pam,
+                        diss = d.eucl, k.max = 10,
+                        method = "wss") + theme_bw())
+# ggsave("Figures/Screeplot.png")
+```
+
+```{r fig.height = 5, fig.width = 5, warning=FALSE, message=FALSE}
+data.frame(Clusters = TESS1$data$clusters,
+           A1 = TESS1$data$y,
+           A2 = TESS2$data$y) %>%
+  gather(key = "Analysis", value = "WSS", -Clusters) %>%
+  ggplot() + geom_line(aes(x = Clusters, y = WSS,
+                           col = Analysis, group = Analysis)) +
+  geom_point(aes(x = Clusters, y = WSS,
+                           col = Analysis, group = Analysis)) +
+  ylab("Total Whitin Sum of Square") +
+  xlab("Number of clusters") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        text = element_text(size = 16),
+        legend.position = "bottom")
+ggsave("Figures/Screeplot.png")
+```
+
+```{r results = 'asis'}
+print(xtable(stat(TESS2, datos = scale(datos1[-1]), dist = d.eucl, clust = 10),
+             digits = 2, label = "tab:index2",
+             caption = "."),
+             caption.placement = "top", comment = FALSE, include.rownames = FALSE)
+```
+
+```{r}
+k = 3
+clustering = pam(d.eucl, k, diss = T)
+datos1[clustering$medoids, ]
+```
+
+```{r fig.height = 5, fig.width = 10, message=FALSE, warning=FALSE}
+fviz_silhouette(clustering, print.summary = FALSE) +
+  theme_bw() +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+# ggsave("Figures/Silhouette.png")
+```
+
+```{r}
+fac.clustering = fa(scale(datos1[-1]), nfactors = 2, rotate = "varimax", fm = "minres")
+
+(corr = tibble(Variable = names(datos1[-1]),
+               Axis1 = t(round(cor(fac.clustering$scores[, 1], scale(datos1[-1])), 4)),
+               # Axis2 = t(round(cor(fac.clustering$scores[, 2], scale(datos1[-1])), 4)),
+               Axis2 = t(round(cor(fac.clustering$scores[, 2], scale(datos1[-1])), 4))))
+```
+
+```{r fig.height = 5, fig.width = 10, message = FALSE, warning = FALSE}
+aux.clus = tibble(x = fac.clustering$scores[, 1],
+                  y = fac.clustering$scores[, 2],
+                  Group = factor(clustering$clustering))
+
+p2 = ggplot(aux.clus, aes(x = x, y = y, color = Group)) +
+  geom_point(aes(shape = Group)) +
+  theme_bw() +
+  labs(x = "Most observed cases", y = "Investment on healthcare (pp)") +
+  geom_text(label = datos1$`Country/Region`, #aux.clus$Cluster,
+            hjust = -0.2, vjust = -.02, show.legend = FALSE) +
+  # geom_encircle(aes(fill = Cluster), s_shape = 1, expand = 0,
+  #               alpha = 0.2, color = "black", show.legend = FALSE) +
+  stat_ellipse(type = "norm", linetype = 1) +
+  # labs(subtitle = paste("Explained variance:", 100*round(mds.pam$GOF[1], 4), "%")) +
+  theme(plot.title = element_text(hjust = 0.5),
+        text = element_text(size = 16),
+        legend.position = "bottom")
+
+ggarrange(p1, p2, labels = "AUTO", common.legend = F,
+                  legend = "bottom", align = "hv", nrow = 1)
+ggsave("Figures/plot2D.png")
+```
+
+\section{Multivariate normal checking}
+
+```{r}
+mvn(data = scale(datos1[clustering$clustering == 1, -1]),
+    mvnTest = "mardia", multivariatePlot = "qq")
+```
+
+```{r}
+mvn(data = scale(datos1[clustering$clustering == 2, -1]),
+    mvnTest = "mardia", multivariatePlot = "qq")
+```
+
+```{r}
+mvn(data = scale(datos1[clustering$clustering == 3, -1]),
+    mvnTest = "mardia", multivariatePlot = "qq")
+```
+
+\subsection{Differences using permutation test}
+
+As we can see, using permutation test we get that both groups are different.
+
+```{r}
+perm = as.data.frame(combn(1:k, m = 2))
+for (i in 1:ncol(perm)) {
+  perm[3, i] = hotelling.test(datos1[clustering$clustering == perm[1, i], -1],
+                              datos1[clustering$clustering == perm[2, i], -1],
+                              perm = TRUE, B = 1000, progBar = F)$pval
+}
+perm
+```
+
+```{r fig.height = 5, fig.width = 5, warning=FALSE, message=FALSE}
+clust1 = scale(datos1[clustering$clustering == 1, -1]) %>%
+  dist(method = "euclidean") %>%
+  hclust(method = "single")
+clust1$labels = datos1$`Country/Region`[clustering$clustering == 1]
+den1 = fviz_dend(x = clust1, k = 1, cex = 0.6,
+                 color_labels_by_k = TRUE,
+                 k_colors = c("red"),
+                 horiz = TRUE) +
+  # geom_hline(yintercept = 4.2, linetype = "dashed") +
+  labs(title = paste("Group 1 (single link), Cophenetic correlation:",
+                     round(cor(scale(datos1[clustering$clustering == 1, -1]) %>% dist(),
+                               cophenetic(clust1)), 4))) +
+  theme_bw()
+# ggsave(plot = den1, filename = "Figures/Dendogram1.png")
+
+clust2 = scale(datos1[clustering$clustering == 2, -1]) %>%
+  dist(method = "euclidean") %>%
+  hclust(method = "single")
+clust2$labels = datos1$`Country/Region`[clustering$clustering == 2]
+den2 = fviz_dend(x = clust2, k = 1, cex = 0.6,
+                 color_labels_by_k = TRUE,
+                 k_colors = c("green"),
+                 horiz = TRUE) +
+  # geom_hline(yintercept = 4.2, linetype = "dashed") +
+  labs(title = paste("Group 2 (single link), Cophenetic correlation:",
+                     round(cor(scale(datos1[clustering$clustering == 2, -1]) %>% dist(),
+                               cophenetic(clust2)), 4))) +
+  theme_bw()
+# ggsave(plot = den2, filename = "Figures/Dendogram2.png")
+
+clust3 = scale(datos1[clustering$clustering == 3, -1]) %>%
+  dist(method = "euclidean") %>%
+  hclust(method = "average")
+clust3$labels = datos1$`Country/Region`[clustering$clustering == 3]
+den3 = fviz_dend(x = clust3, k = 1, cex = 0.6,
+                 color_labels_by_k = TRUE,
+                 k_colors = c("blue"),
+                 horiz = TRUE) +
+  # geom_hline(yintercept = 4.2, linetype = "dashed") +
+  # labs(title = paste("Group 3 (average link), Cophenetic correlation:",
+  #                    round(cor(scale(datos1[clustering$clustering == 3, -1]) %>% dist(),
+  #                              cophenetic(clust3)), 4))) +
+  labs(title = "") +
+  theme_bw()
+ggsave(plot = den3, filename = "Figures/Dendogram3.png")
+
+# ggarrange(den1, den2, den3, labels = "AUTO", ncol = 1, nrow = 3)
+# ggsave("Figures/Dendogram.png")
+```
+
+\section{Variable analysis}
+
+```{r fig.height = 5, fig.width = 10, warning=FALSE, message=FALSE}
+datos1[-1] %>% mutate(Group = factor(clustering$clustering)) %>%
+  gather(key = "Variable", value = "value", -Group) %>%
+  mutate(Variable = as.numeric(factor(Variable))) %>% #dplyr::select(Variable)
+  ggplot() + geom_density(aes(x = value, fill = Group), alpha = 0.3) +
+  # xlim(c(-10,10)) +
+  facet_wrap(~ Variable, nrow = 2,
+             scales = "free", #labeller = "label_both",
+             strip.position = "top") +
+  theme_bw() + ylab("") +
+  theme(legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5),
+        text = element_text(size = 16),
+        axis.text.x = element_blank())
+ggsave("Figures/VarDens.png")
+```
+
+\section{Canonical correlation analysis}
+
+```{r fig.height = 5, fig.width = 10, warning=FALSE, message=FALSE}
+library(CCA)
+data.cca = datos1 %>% dplyr::select(-c(Mean_confirmed, Mean_death, Mean_recovered,
+                                       SD_confirmed, SD_death, SD_recovered))
+handle = data.cca[c(1:4)]
+health = data.cca[-c(2:4)]
+cca = cc(scale(handle[-1]), scale(health[-1]))
+plt.cc(cca, var.label = TRUE)#, ind.names = data.cca[1])
+```
+
+```{r}
+library(vegan)
+cca2 = cca(handle[-1], health[-1])
+plot(cca2, scaling = 1)
+```
+
+
+\section{Forecasting}
+
+```{r}
+datos.reg = datos1 %>% dplyr::select(c("Health_exp_public_pct_2016",
+                                       "Health_exp_per_capita_USD_2016",
+                                       "Nurse_midwife_per_1000_2009.18",
+                                       "Specialist_surgical_per_1000_2008.18"))
+reg.mean = apply(datos.reg, 2, mean)
+reg.sd = apply(datos.reg, 2, sd)
+
+datos.reg = datos.reg %>% scale(center = reg.mean, scale = reg.sd)
+d.reg = datos.reg %>% dist() %>% as.matrix()
+join = cbind(as.data.frame(clustering$clustering), d.reg)
+```
+
+```{r}
+datos.pred = health[!(health$Country_Region %in% datos1$`Country/Region`), ] %>%
+  dplyr::select(c("Health_exp_public_pct_2016",
+                  "Health_exp_per_capita_USD_2016",
+                  "Nurse_midwife_per_1000_2009.18",
+                  "Specialist_surgical_per_1000_2008.18"))
+
+datos.pred = datos.pred %>% scale(center = reg.mean, scale = reg.sd)
+d.pred = rbind(datos.reg, datos.pred) %>% dist() %>% as.matrix()
+d.pred = d.pred[c((dim(d.pred)[1] - nrow(datos.pred) + 1):dim(d.pred)[1]),
+                c(1:ncol(d.reg))] # quiero extraer el cuadrante derecho-izquierda
+```
+
+```{r}
+library(WeDiBaDis)
+out = WDBdisc(data = join, datatype = "d", method = "WDB")
+summary(out)
+pred = WDBdisc(data = join, datatype = "d", method = "WDB", new.ind = d.pred)
+country.aux = data.frame(Country = health[!(health$Country_Region %in% datos1$`Country/Region`), 1],
+                         Group = pred$pred)
+```
+
+```{r fig.height = 5, fig.width = 10, warning=FALSE, message=FALSE}
+map.world = map_data(map = "world")
+
+aux = data.frame(region = c(datos1$`Country/Region`,
+                            as.character(country.aux$Country)),
+                 Group = c(clustering$clustering,
+                           as.numeric(country.aux$Pred..class)))
+
+map.world$Cluster = left_join(map.world, aux, by = c("region"))
+
+map.world$Cluster %>% ggplot() +
+  geom_map(map = map.world,
+           aes(map_id = region, x = long, y = lat), col = "black", fill = "grey") +
+  geom_map(map = map.world, col = "black",
+           aes(map_id = region, x = long, y = lat,
+               fill = factor(Group))) +
+  ylim(c(-55, 80)) +
+  labs(title = "", x = "", y = "", fill = "Group") +
+  scale_fill_discrete(na.translate = FALSE, na.value = "grey") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5),
+        text = element_text(size = 16),
+        legend.position = "bottom")
+ggsave("Figures/Worldmap.png")
+```
+
